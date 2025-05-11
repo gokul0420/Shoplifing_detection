@@ -1,7 +1,6 @@
-![compute_vision,image_processing_and_open_cv 1](https://github.com/alich03/Shoplifting-Detection-using-yolov8/assets/104387113/348769f2-9367-4416-8a16-c7a6098040d8)
-# Shoplifting-Detection-using-yolov8
 
-Shoplifting Detection in Computer Vision using YOLOv8 Model 🛡️💡 Innovative Research & Development
+
+
 
 Discover the cutting-edge world of Computer Vision and AI in the realm of shoplifting detection! 🚀 Our groundbreaking solution harnesses the power of the advanced YOLOv8 model to enhance security and prevent theft in retail environments.
 
