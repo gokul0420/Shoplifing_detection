@@ -1,28 +1,61 @@
+# inference/detect_shoplifting.py
+import json
+import os
+import sys
+from pathlib import Path
+
+# ------------------------------------------------------------------
+# Make project root importable
+# ------------------------------------------------------------------
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 import cv2
 import numpy as np
 import torch
-from detectors.person_detector import detect_people
-from sort_tracker import Sort
-from analyzer.behavior_scorer import BehaviorAnalyzer
+
+from detectors.yolo_detector import detect_people
 from features.feature_extractor import FeatureExtractor
 from model.sequence_classifier import SequenceClassifier
-import os, json
+from tracking.sort_tracker import init_tracker
 
-video_path = 'data/raw_videos/shoplifting_1.mp4'
-out_dir = 'outputs/annotated_videos/'
-os.makedirs(out_dir, exist_ok=True)
-cap = cv2.VideoCapture(video_path)
+# ------------------------------------------------------------------
+# Config
+# ------------------------------------------------------------------
+VIDEO_PATH = "data/raw_videos/normal/normal-2.mp4"
+OUT_DIR    = Path("outputs/annotated_videos")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+THRESH = 0.80                # NEW: probability ≥ THRESH → "shoplifting"
+
+# ------------------------------------------------------------------
+# I/O setup
+# ------------------------------------------------------------------
+cap = cv2.VideoCapture(str(VIDEO_PATH))
+if not cap.isOpened():
+    raise FileNotFoundError(f"Cannot open video: {VIDEO_PATH}")
+
 width, height = int(cap.get(3)), int(cap.get(4))
-out = cv2.VideoWriter(f'{out_dir}/result.avi', cv2.VideoWriter_fourcc(*'XVID'), 30, (width, height))
+out_vid = cv2.VideoWriter(
+    str(OUT_DIR / "result.avi"),
+    cv2.VideoWriter_fourcc(*"XVID"),
+    int(cap.get(cv2.CAP_PROP_FPS) or 30),
+    (width, height),
+)
 
+# ------------------------------------------------------------------
+# Load models
+# ------------------------------------------------------------------
 extractor = FeatureExtractor()
-tracker = Sort()
-model = SequenceClassifier()
-model.load_state_dict(torch.load('model/shoplifting_lstm.pth'))
+tracker   = init_tracker()
+model     = SequenceClassifier()
+model.load_state_dict(torch.load("model/shoplifting_lstm.pth", map_location="cpu"))
 model.eval()
 
 track_features = {}
 
+# ------------------------------------------------------------------
+# Main loop
+# ------------------------------------------------------------------
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -30,37 +63,43 @@ while True:
 
     boxes = detect_people(frame)
     detections = [[x, y, x + w, y + h, 1.0] for (x, y, w, h) in boxes]
-    tracked = tracker.update(np.array(detections))
+    tracked = tracker.update(np.array(detections)) if len(detections) else []
 
-    for x1, y1, x2, y2, obj_id in tracked:
+    for x1, y1, x2, y2, tid in tracked:
         crop = frame[int(y1):int(y2), int(x1):int(x2)]
-        if crop.size == 0:
-            continue
         feat = extractor.extract(crop)
-        if int(obj_id) not in track_features:
-            track_features[int(obj_id)] = []
-        track_features[int(obj_id)].append(feat)
+        if feat is None:
+            continue
+
+        tid = int(tid)
+        track_features.setdefault(tid, []).append(feat)
 
         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-        cv2.putText(frame, f"ID {int(obj_id)}", (int(x1), int(y1)-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        cv2.putText(frame, f"ID {tid}", (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    out.write(frame)
-    cv2.imshow('Tracking', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    out_vid.write(frame)
 
 cap.release()
-out.release()
+out_vid.release()
 cv2.destroyAllWindows()
 
-final_scores = {}
-for obj_id, feats in track_features.items():
-    sequence = torch.tensor([feats], dtype=torch.float32)
+# ------------------------------------------------------------------
+# Score each track with the LSTM + label conversion
+# ------------------------------------------------------------------
+labels = {}                                   # NEW: store textual labels
+for tid, feats in track_features.items():
+    seq_np = np.array(feats, dtype=np.float32)          # faster than list→tensor
+    seq    = torch.from_numpy(seq_np).unsqueeze(0)
     with torch.no_grad():
-        score = model(sequence).item()
-    final_scores[obj_id] = score
+        p = model(seq).item()
+    labels[tid] = "shoplifting" if p >= THRESH else "normal"
 
-with open('outputs/scores.json', 'w') as f:
-    json.dump(final_scores, f, indent=2)
-print("Scores:", final_scores)
+# ------------------------------------------------------------------
+# Save / print
+# ------------------------------------------------------------------
+with open("outputs/scores.json", "w") as f:
+    json.dump(labels, f, indent=2)
+
+print("✅  Finished. Labels saved to outputs/scores.json")
+print("Final decision per ID:", labels)
